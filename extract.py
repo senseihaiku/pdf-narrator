@@ -82,7 +82,8 @@ def convert_numbers(text):
         try:
             # Handle potential decimals - leave them as digits for now, TTS often handles them well
             if '.' in num_str:
-                return num_str
+                try: return num2words(float(num_str))      # 3.14 -> "three point one four"
+                except Exception: return num_str
             num = int(num_str)
             # Year handling (common range)
             if 1500 <= num <= 2100:
@@ -104,14 +105,16 @@ def convert_numbers(text):
     # Regex to find integers possibly followed by ordinal suffixes (st, nd, rd, th)
     # We target whole numbers primarily, potentially with ordinal indicators
     # Make suffix optional and capture it to decide if ordinal conversion is needed
-    pattern = r'\b(\d+)(st|nd|rd|th)?\b'
+    # Fångar även decimaler (3.14, 19.99): utan (?:\.\d+)? matchades heltalen var för sig,
+    # decimalgrenen ovan blev död kod och punkten blev sedan ett falskt meningsslut.
+    pattern = r'\b(\d+(?:\.\d+)?)(st|nd|rd|th)?\b'
     text = re.sub(pattern, replace_match, text)
     return text
 
 def handle_sentence_ends_and_pauses(text):
     """Ensure sentences end cleanly and handle potential pauses."""
     # Add a space before punctuation if missing (helps TTS parsing)
-    text = re.sub(r'(?<=\w)([.,!?;:])', r' \1', text)
+    text = re.sub(r'(?<=\w)([.,!?;:])(?!\d)', r' \1', text)   # (?!\d): rör inte 3.14 / 1,5
     # Normalize multiple spaces
     text = re.sub(r' +', ' ', text)
 
@@ -142,7 +145,7 @@ def handle_sentence_ends_and_pauses(text):
     # Add newline after sentence-ending punctuation for potential TTS break cues
     # Ensure space doesn't exist before newline, add it if needed for clarity.
     # This version adds newline *after* the punctuation and a space.
-    text = re.sub(r'([.!?:])\s*', r'\1\n', text) # Ensures newline separation after sentence ends
+    text = re.sub(r'([.!?:])(?!\d)\s*', r'\1\n', text) # Ensures newline separation after sentence ends; (?!\d) skyddar 3.14
 
     return text
 

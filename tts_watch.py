@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-tts_watch.py – mappvakt: dokument in i iCloud Drive/tts, ljudbok ut.
+tts_watch.py, mappvakt: dokument in i iCloud Drive/tts, ljudbok ut.
 
 Flöde
   iCloud Drive/tts/<fil>            ← du lägger en pdf/epub/txt/md/docx/rtf här
@@ -120,12 +120,26 @@ def kokoro_pipeline():
     device = os.environ.get("TTS_DEVICE", "mps" if torch.backends.mps.is_available() else "cpu")
     threads = int(os.environ.get("TTS_THREADS", "0"))       # 0 = torchs standard (4)
     if threads > 0: torch.set_num_threads(threads)
+    # TTS_FAST=1: bygg KModel själv med disable_complex (undviker torch.angle i STFT) och
+    # fäll ihop weight_norm (annars räknas w = g·v/|v| om vid VARJE forward, deprecated
+    # hook). Granskningen 5/9 mätte +21 % (53,8 → 65,3 tecken/s). Standard AV tills
+    # ljudekvivalensen mot standardmodellen är kontrollerad; remove_weight_norm är
+    # matematiskt identisk, disable_complex är Kokoros egen alternativväg.
+    fast = os.environ.get("TTS_FAST", "0") == "1"
+    def build(dev):
+        if not fast: return KPipeline(lang_code="a", device=dev)
+        from kokoro import KModel
+        m = KModel(repo_id="hexgrad/Kokoro-82M", disable_complex=True)
+        for mod in m.modules():
+            try: torch.nn.utils.remove_weight_norm(mod)
+            except ValueError: pass
+        return KPipeline(lang_code="a", model=m.to(dev).eval(), device=dev)
     try:
-        pipe = KPipeline(lang_code="a", device=device)
+        pipe = build(device)
     except Exception as e:
         log(f"varning: {device} misslyckades ({e}), faller tillbaka på CPU"); device = "cpu"
-        pipe = KPipeline(lang_code="a", device="cpu")
-    return pipe, device
+        pipe = build("cpu")
+    return pipe, device + (" fast" if fast else "")
 
 def synthesize(text: str, mp3: Path, progress_path: Path, loglines: list):
     import numpy as np
@@ -186,11 +200,13 @@ def run_file(src: Path):
     dest.mkdir(parents=True)
     # Originalet flyttas in DIREKT: mappen i _outputs visar vad som pågår, med källan i.
     # Dör körningen ligger originalet kvar där bredvid den halva mp3:n, synligt.
-    shutil.move(str(src), str(dest / src.name)); src = dest / src.name
     progress = dest / "progress.txt"      # ankare för mappen; report() namnger själv
     t0 = time.time()
     loglines = [f"källa: {src.name}", f"start: {datetime.now():%Y-%m-%d %H:%M:%S}"]
     try:
+        # Inuti try: misslyckas flytten (iCloud-stubb, rättigheter) ska det loggas och
+        # hamna i _failed, inte bli en tyst evig omstart från inkorgen.
+        shutil.move(str(src), str(dest / src.name)); src = dest / src.name
         with tempfile.TemporaryDirectory() as td:
             text = extract_text(src, Path(td)).strip()
         if len(text) < 20:
@@ -214,22 +230,38 @@ def run_file(src: Path):
 
 # ── vakten ─────────────────────────────────────────────────────────────────────
 def process(src: Path):
-    """Kör filen i en egen process så Kokoro/torch-minnet frigörs efteråt."""
+    """Kör filen i en egen process så Kokoro/torch-minnet frigörs efteråt.
+    Dör barnet hårt (segfault, OOM-kill, kill -9) når ingen except-sats i run_file;
+    därför kontrolleras exitkoden här och felet skrivs dit filen ligger."""
     log(f"START {src.name}")
-    subprocess.run([sys.executable, str(Path(__file__).resolve()), "--process", str(src)])
+    rc = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--process", str(src)]).returncode
+    if rc == 0: return
+    note = f"FEL: underprocessen dog med kod {rc} (krasch, minnesbrist eller dödad utifrån)\n"
+    if src.exists():                      # flyttades aldrig: lägg i _failed så den inte loopar
+        fdest = FAILED / safe_name(src); fdest.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(fdest / src.name)); (fdest / "log.txt").write_text(note, encoding="utf-8")
+        log(f"FEL   {src.name}: exit {rc}, flyttad till _failed")
+        return
+    stuck = [d for d in OUT.glob(f"{safe_name(src)}*") if d.is_dir() and not (d / "log.txt").exists()]
+    for d in stuck:
+        (d / "log.txt").write_text(note, encoding="utf-8")
+        for p in d.glob("pågår_*_procent.txt"): p.unlink(missing_ok=True)
+    log(f"FEL   {src.name}: exit {rc}, se log.txt i {', '.join(d.name for d in stuck) or '?'}")
 
 def pending():
+    """Filer i inkorgen vars storlek varit stabil i STABLE_SECONDS (iCloud-synk pågår
+    annars). EN väntan för alla filer, inte en per fil: med en väntan per fil och
+    ≥10 filer överskreds 30-sekundersalarmet i main() och vakten fastnade i evig omstart."""
     if not WATCH.exists(): return []
-    out = []
+    cand = {}
     for p in sorted(WATCH.iterdir()):
         if not p.is_file() or p.name.startswith(".") or p.suffix.lower() not in EXTS:
             continue                      # undermappar, .icloud-stubbar, .DS_Store
-        s1 = p.stat().st_size
-        if s1 == 0: continue
-        time.sleep(STABLE_SECONDS)
-        if p.exists() and p.stat().st_size == s1:
-            out.append(p)
-    return out
+        s = p.stat().st_size
+        if s > 0: cand[p] = s
+    if not cand: return []
+    time.sleep(STABLE_SECONDS)
+    return [p for p, s in cand.items() if p.exists() and p.stat().st_size == s]
 
 class ICloudBlocked(Exception): pass
 def _alarm(signum, frame): raise ICloudBlocked()
