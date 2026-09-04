@@ -120,16 +120,18 @@ def kokoro_pipeline():
     device = os.environ.get("TTS_DEVICE", "mps" if torch.backends.mps.is_available() else "cpu")
     threads = int(os.environ.get("TTS_THREADS", "0"))       # 0 = torchs standard (4)
     if threads > 0: torch.set_num_threads(threads)
-    # TTS_FAST=1: bygg KModel själv med disable_complex (undviker torch.angle i STFT) och
-    # fäll ihop weight_norm (annars räknas w = g·v/|v| om vid VARJE forward, deprecated
-    # hook). Granskningen 5/9 mätte +21 % (53,8 → 65,3 tecken/s). Standard AV tills
-    # ljudekvivalensen mot standardmodellen är kontrollerad; remove_weight_norm är
-    # matematiskt identisk, disable_complex är Kokoros egen alternativväg.
-    fast = os.environ.get("TTS_FAST", "0") == "1"
+    # TTS_FAST (standard 1): bygg KModel själv och fäll ihop weight_norm en gång. Annars
+    # räknas w = g·v/|v| om i ~30 lager vid VARJE forward (utfasad forward-pre-hook).
+    # Granskningen 5/9 mätte +1 till +19 % beroende på körning, aldrig sämre.
+    # Ljudekvivalens kontrollerad 5/9: skillnaden mot standardmodellen ligger på
+    # nivån av Kokoros eget slumpbrus mellan två frön (korr 0,995, samma RMS).
+    # Kokoros disable_complex (conv1d i stället för FFT) provades också: korr 0,93 och
+    # 14 % högre ljudnivå, alltså ett hörbart annat ljud. Används inte.
+    fast = os.environ.get("TTS_FAST", "1") == "1"
     def build(dev):
         if not fast: return KPipeline(lang_code="a", device=dev)
         from kokoro import KModel
-        m = KModel(repo_id="hexgrad/Kokoro-82M", disable_complex=True)
+        m = KModel(repo_id="hexgrad/Kokoro-82M")
         for mod in m.modules():
             try: torch.nn.utils.remove_weight_norm(mod)
             except ValueError: pass
