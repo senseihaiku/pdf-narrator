@@ -111,13 +111,13 @@ def make_chunks(text: str):
 
 # ── TTS: Kokoro → ffmpeg-ström → mp3 ───────────────────────────────────────────
 def kokoro_pipeline():
-    # Mätt 5/9 2026 på M-serien: MPS ger ingen vinst (STFT faller tillbaka på CPU,
-    # kopieringen äter resten), 1,7x realtid mot CPU:s 1,9x. Därför CPU som standard.
-    # Överstyr med TTS_DEVICE=mps om en senare torch/kokoro gör MPS meningsfull.
+    # Mätt rent 5/9 2026 (inget annat igång, egen text): MPS 67 tecken/s (3,8x realtid)
+    # mot CPU 47 (2,7x). STFT faller tillbaka på CPU (reservflaggan) men MPS vinner ändå.
+    # En tidigare mätning under störning visade motsatsen; den var fel. Överstyr med TTS_DEVICE.
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")  # före torch-importen
     import torch
     from kokoro import KPipeline
-    device = os.environ.get("TTS_DEVICE", "cpu")
+    device = os.environ.get("TTS_DEVICE", "mps" if torch.backends.mps.is_available() else "cpu")
     threads = int(os.environ.get("TTS_THREADS", "0"))       # 0 = torchs standard (4)
     if threads > 0: torch.set_num_threads(threads)
     try:
