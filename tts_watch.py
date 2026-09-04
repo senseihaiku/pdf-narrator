@@ -4,8 +4,8 @@ tts_watch.py – mappvakt: dokument in i iCloud Drive/tts, ljudbok ut.
 
 Flöde
   iCloud Drive/tts/<fil>            ← du lägger en pdf/epub/txt/md/docx/rtf här
-  iCloud Drive/tts/_outputs/<namn>/ ← <namn>.mp3, originalet flyttat hit, log.txt
-                                       (progress.txt under körning, raderas när klart)
+  iCloud Drive/tts/_outputs/<namn>/ ← originalet flyttas hit vid START, sedan <namn>.mp3, log.txt
+                                       (pågår_NN_procent.txt under körning, raderas när klart)
   iCloud Drive/tts/_outputs/_failed/<namn>/ ← om något gick fel, felet i log.txt
 
 Allt läses av Kokoro (engelsk röst). Språket detekteras bara för loggen.
@@ -142,7 +142,12 @@ def synthesize(text: str, mp3: Path, progress_path: Path, loglines: list):
         eta = (el / pct - el) if pct > 0.005 else float("nan")
         msg = (f"{pct*100:5.1f} %  ({done:,} / {total:,} tecken)  "
                f"gått {el/60:.0f} min, ~{eta/60:.0f} min kvar  [{device}]")
-        progress_path.write_text(f"{datetime.now():%H:%M:%S}  {msg}\n", encoding="utf-8")
+        # Procenten i FILNAMNET så den syns i Filer-appens lista utan att öppna filen
+        # (och utan att bero på att iCloud hunnit synka innehållet).
+        for old in progress_path.parent.glob("pågår_*_procent.txt"):
+            old.unlink(missing_ok=True)
+        pfile = progress_path.parent / f"pågår_{int(pct*100):02d}_procent.txt"
+        pfile.write_text(f"{datetime.now():%H:%M:%S}  {msg}\n", encoding="utf-8")
         return msg
 
     ff = subprocess.Popen([FFMPEG, "-y", "-loglevel", "error",
@@ -179,7 +184,10 @@ def run_file(src: Path):
     while dest.exists():
         dest = OUT / f"{name}-{i}"; i += 1
     dest.mkdir(parents=True)
-    progress = dest / "progress.txt"
+    # Originalet flyttas in DIREKT: mappen i _outputs visar vad som pågår, med källan i.
+    # Dör körningen ligger originalet kvar där bredvid den halva mp3:n, synligt.
+    shutil.move(str(src), str(dest / src.name)); src = dest / src.name
+    progress = dest / "progress.txt"      # ankare för mappen; report() namnger själv
     t0 = time.time()
     loglines = [f"källa: {src.name}", f"start: {datetime.now():%Y-%m-%d %H:%M:%S}"]
     try:
@@ -188,12 +196,11 @@ def run_file(src: Path):
         if len(text) < 20:
             raise RuntimeError(f"för lite text ({len(text)} tecken)")
         loglines += [f"tecken: {len(text):,}", f"språk (detekterat): {detect_lang(text)}"]
-        progress.write_text("startar Kokoro …\n", encoding="utf-8")
+        (dest / "pågår_00_procent.txt").write_text("startar Kokoro …\n", encoding="utf-8")
         synthesize(text, dest / f"{name}.mp3", progress, loglines)
-        shutil.move(str(src), str(dest / src.name))
         loglines.append(f"klart: {time.time()-t0:.0f}s")
         (dest / "log.txt").write_text("\n".join(loglines) + "\n", encoding="utf-8")
-        progress.unlink(missing_ok=True)
+        for p in dest.glob("pågår_*_procent.txt"): p.unlink(missing_ok=True)
         log(f"KLAR  {src.name} → {dest.relative_to(WATCH)}  ({time.time()-t0:.0f}s)")
     except Exception as e:
         loglines += [f"FEL: {e}", traceback.format_exc()]
